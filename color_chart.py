@@ -364,7 +364,13 @@ class Visualizer:
             x = fp.get("x", 0.5) * w
             y = fp.get("y", 0.5) * h
             radius = min(w, h) * 0.03
-            color = (255, 50, 50)
+
+            # 中心ピクセルの輝度に応じて描画色を白/黒に切り替え
+            cx = int(min(max(x, 0), w - 1))
+            cy = int(min(max(y, 0), h - 1))
+            bg = overlay.convert("RGB").getpixel((cx, cy))
+            brightness = (bg[0] * 299 + bg[1] * 587 + bg[2] * 114) / 1000
+            color = (255, 255, 255) if brightness < 128 else (0, 0, 0)
 
             # 円
             draw.ellipse(
@@ -377,13 +383,18 @@ class Visualizer:
             draw.line([(x - cross, y), (x + cross, y)], fill=color, width=2)
             draw.line([(x, y - cross), (x, y + cross)], fill=color, width=2)
 
-            # ラベル
+            # ラベル（背景輝度に応じて文字色を白/黒に切り替え）
             label = fp.get("description", f"Point {i + 1}")
             font = Visualizer._get_font(max(12, min(w, h) // 40))
+            lx = int(min(x + radius + 5, w - 1))
+            ly = int(min(max(y - radius, 0), h - 1))
+            bg = overlay.convert("RGB").getpixel((lx, ly))
+            brightness = (bg[0] * 299 + bg[1] * 587 + bg[2] * 114) / 1000
+            text_color = (255, 255, 255) if brightness < 128 else (0, 0, 0)
             draw.text(
-                (x + radius + 5, y - radius),
+                (lx, ly),
                 label,
-                fill=color,
+                fill=text_color,
                 font=font,
             )
 
@@ -561,14 +572,10 @@ class Visualizer:
             w = max(int(swatch_w * pct), 1)
             draw.rectangle([x, 0, x + w, swatch_h - 30], fill=color)
 
-            hex_str = ColorAnalyzer.rgb_to_hex(*color)
             pct_str = f"{pct * 100:.1f}%"
             text_x = x + 4
             text_y = swatch_h - 26
-            # テキストの輝度に応じて白か黒
-            brightness = (color[0] * 299 + color[1] * 587 + color[2] * 114) / 1000
-            text_color = (255, 255, 255) if brightness < 128 else (0, 0, 0)
-            draw.text((text_x, text_y), f"{hex_str} {pct_str}", fill=text_color, font=font)
+            draw.text((text_x, text_y), pct_str, fill=(255, 255, 255), font=font)
 
             x += w
 
@@ -657,28 +664,13 @@ def run_analysis(
     # --- カラー分析（アルゴリズム） ---
     if do_color:
         colors, percentages = ColorAnalyzer.extract_colors(image)
-        scheme, emoji = ColorAnalyzer.classify_scheme(colors)
+        scheme, _ = ColorAnalyzer.classify_scheme(colors)
         warm, cool = ColorAnalyzer.get_color_temperature(colors, percentages)
         color_swatch = Visualizer.create_color_swatch(colors, percentages)
         color_wheel = Visualizer.create_color_wheel(colors, percentages)
 
-        lines = [f"## カラースキーム: {scheme} {emoji}\n"]
+        lines = [f"## カラースキーム: {scheme}\n"]
         lines.append(f"**色温度**: 暖色 {warm}% / 寒色 {cool}%\n")
-        lines.append("### 支配色\n")
-        lines.append("| # | 色 | HEX | RGB | HSV | 割合 |")
-        lines.append("|---|---|-----|-----|-----|------|")
-        for i, (c, p) in enumerate(zip(colors, percentages), 1):
-            hex_val = ColorAnalyzer.rgb_to_hex(*c)
-            h, s, v = ColorAnalyzer.rgb_to_hsv(*c)
-            swatch_html = (
-                f'<span style="display:inline-block;width:18px;height:18px;'
-                f"background:{hex_val};border:1px solid #888;border-radius:3px;"
-                f'vertical-align:middle;"></span>'
-            )
-            hsv_str = f"{h:.0f}°, {s*100:.0f}%, {v*100:.0f}%"
-            lines.append(
-                f"| {i} | {swatch_html} | `{hex_val}` | ({c[0]}, {c[1]}, {c[2]}) | {hsv_str} | {p*100:.1f}% |"
-            )
         color_text = "\n".join(lines)
 
     # --- LLMが必要な分析（モデルを一度だけロード） ---
@@ -931,7 +923,7 @@ def create_app() -> gr.Blocks:
     with gr.Blocks(
         title="Color Chart - 画像分析ツール",
     ) as app:
-        gr.Markdown("# Color Chart\n美術理論に基づいた画像分析ツール")
+        gr.Markdown("# Color Chart")
 
         # 分析結果の内部状態
         composition_data_state = gr.State("{}")
@@ -940,46 +932,49 @@ def create_app() -> gr.Blocks:
             # ===== 分析タブ =====
             with gr.Tab("分析", id="analysis"):
                 with gr.Row():
-                    # --- 左カラム: 入力 ---
+                    # --- カラム1: 入力 ---
                     with gr.Column(scale=1):
                         input_image = gr.Image(
                             label="画像をアップロード",
                             type="pil",
                             height=400,
                         )
-                        with gr.Row():
-                            model_dropdown = gr.Dropdown(
-                                label="モデル選択",
-                                choices=get_model_choices(),
-                                value=get_model_choices()[0] if has_models else None,
-                                interactive=True,
-                                scale=3,
-                            )
-                            unload_btn = gr.Button("アンロード", variant="secondary", scale=1)
-                        unload_status = gr.Markdown("")
-                        with gr.Row():
-                            do_color = gr.Checkbox(label="カラー分析", value=cb["do_color"])
-                            do_composition = gr.Checkbox(label="コンポジション分析", value=cb["do_composition"])
+                        with gr.Accordion("設定", open=True):
+                            with gr.Row():
+                                model_dropdown = gr.Dropdown(
+                                    label="モデル選択",
+                                    choices=get_model_choices(),
+                                    value=get_model_choices()[0] if has_models else None,
+                                    interactive=True,
+                                    scale=3,
+                                )
+                                unload_btn = gr.Button("アンロード", variant="secondary", scale=1)
+                            unload_status = gr.Markdown("")
+                            with gr.Row():
+                                do_color = gr.Checkbox(label="カラー分析", value=cb["do_color"])
+                                do_composition = gr.Checkbox(label="コンポジション分析", value=cb["do_composition"])
                         analyze_btn = gr.Button("分析開始", variant="primary", size="lg")
 
-                    # --- 右カラム: 結果 ---
+                    # --- カラム2: カラー分析 ---
                     with gr.Column(scale=1):
-                        with gr.Tabs():
-                            with gr.Tab("カラー分析"):
-                                with gr.Row():
-                                    color_swatch = gr.Image(label="カラースウォッチ", height=140)
-                                    color_wheel = gr.Image(label="カラーホイール", height=400)
-                                color_result = gr.Markdown(label="カラー分析結果")
-                                llm_color_result = gr.Markdown(label="AIカラー分析")
-                            with gr.Tab("コンポジション分析"):
-                                composition_result = gr.Markdown(label="コンポジション分析結果")
-                                overlay_image = gr.Image(label="オーバーレイ表示", height=400)
-                                gr.Markdown("### オーバーレイ表示")
-                                with gr.Row():
-                                    show_grid = gr.Checkbox(label="三分割法", value=cb["show_grid"])
-                                    show_focal = gr.Checkbox(label="フォーカルポイント", value=cb["show_focal"])
-                                    show_heatmap = gr.Checkbox(label="彩度ヒートマップ", value=cb["show_heatmap"])
-                                    show_negative = gr.Checkbox(label="ネガティブスペース", value=cb["show_negative"])
+                        gr.Markdown("### カラー分析")
+                        color_result = gr.Markdown()
+                        llm_color_result = gr.Markdown()
+                        with gr.Row():
+                            color_swatch = gr.Image(label="カラースウォッチ", height=140)
+                            color_wheel = gr.Image(label="カラーホイール", height=400)
+
+                    # --- カラム3: コンポジション分析 ---
+                    with gr.Column(scale=1):
+                        gr.Markdown("### コンポジション分析")
+                        composition_result = gr.Markdown()
+                        overlay_image = gr.Image(label="オーバーレイ表示", height=400)
+                        gr.Markdown("#### オーバーレイ表示")
+                        with gr.Row():
+                            show_grid = gr.Checkbox(label="三分割法", value=cb["show_grid"])
+                            show_focal = gr.Checkbox(label="フォーカルポイント", value=cb["show_focal"])
+                            show_heatmap = gr.Checkbox(label="彩度ヒートマップ", value=cb["show_heatmap"])
+                            show_negative = gr.Checkbox(label="ネガティブスペース", value=cb["show_negative"])
 
                 # チェックボックスの状態を保存
                 checkboxes_to_save = {
